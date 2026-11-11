@@ -8745,22 +8745,35 @@ static int dt_set_sep(void)
 
     u64 phys_map[2];
     int ret = ADT_GETPROP_ARRAY(adt, anode_mmap, "SEPFW", phys_map);
-    if (ret != (int)sizeof(phys_map) || !phys_map[0] || !phys_map[1] ||
-        phys_map[0] > UINT64_MAX - phys_map[1] ||
-        (chip_id == T8140 && (phys_map[0] < dram_base || phys_map[0] > dram_base + dram_size ||
-                              phys_map[1] > dram_base + dram_size - phys_map[0])))
-        bail("ADT: could not get sepfw memory\n");
+    bool sepfw_ok = ret == (int)sizeof(phys_map) && phys_map[0] && phys_map[1] &&
+                    phys_map[0] <= UINT64_MAX - phys_map[1] &&
+                    !(chip_id == T8140 &&
+                      (phys_map[0] < dram_base || phys_map[0] > dram_base + dram_size ||
+                       phys_map[1] > dram_base + dram_size - phys_map[0]));
+    if (!sepfw_ok && chip_id == T8142) {
+        /*
+         * J815 bring-up: the SEP is pre-booted by iBoot (sepfw-booted), so
+         * apple_sep warm-attaches and never needs the image. Whether iBoot
+         * 27.0 still lists SEPFW in the memory map on T8142 is unverified;
+         * don't fail the whole boot over it, still publish the manifests.
+         */
+        printf("ADT: no usable SEPFW region on T8142; skipping the sepfw reservation\n");
+    } else {
+        if (!sepfw_ok)
+            bail("ADT: could not get sepfw memory\n");
 
-    const char *node_name = "sep-firmware";
-    int mem_node =
-        dt_get_or_add_reserved_mem(node_name, "apple,asc-mem", false, phys_map[0], phys_map[1]);
-    if (mem_node < 0)
-        bail("FDT: failed to reserve sepfw");
+        const char *node_name = "sep-firmware";
+        int mem_node = dt_get_or_add_reserved_mem(node_name, "apple,asc-mem", false,
+                                                  phys_map[0], phys_map[1]);
+        if (mem_node < 0)
+            bail("FDT: failed to reserve sepfw");
 
-    uint32_t mem_phandle = fdt_get_phandle(dt, mem_node);
-    ret = dt_device_add_mem_region(path, mem_phandle, "sepfw");
-    if (ret < 0)
-        bail("FDT: failed to add sepfw region");
+        uint32_t mem_phandle = fdt_get_phandle(dt, mem_node);
+        ret = dt_device_add_mem_region(path, mem_phandle, "sepfw");
+        if (ret < 0)
+            bail("FDT: failed to add sepfw region");
+        printf("FDT: SEP firmware reserved at 0x%lx (0x%lx bytes)\n", phys_map[0], phys_map[1]);
+    }
 
     int anode_manifest = adt_path_offset(adt, "/chosen/boot-object-manifests");
     if (anode_manifest < 0) {
@@ -11310,8 +11323,12 @@ int kboot_prepare_dt(void *fdt)
         return -1;
     if (dt_set_multitouch())
         return -1;
-    if (dt_set_sep())
-        return -1;
+    if (dt_set_sep()) {
+        /* J815 bring-up: Touch ID is optional; a SEP DT problem must not stop Linux. */
+        if (chip_id != T8142)
+            return -1;
+        printf("FDT: SEP setup failed on T8142; booting without the SEP manifests\n");
+    }
     if (dt_set_pmp())
         return -1;
     if (dt_set_pmp_device_dvfs())
