@@ -459,6 +459,29 @@ bool smp_s2r_published(void)
  * first entry, and init_cpu() has redone the per-core setup. The watchdog is the
  * OS's: it armed it, and it stops it.
  */
+/*
+ * T8142 (J815 bring-up): no S2R wake has come back yet, and a WD2 reset keeps no log. WD2's
+ * timeout tells where a wake stopped instead: the engine's wake program leaves it at 5 s,
+ * aura's reset path sets 40 s (30 s where the mailbox turns the wake away), and the OS's stub
+ * sets 60 s. Same order and address as the OS's (ADT /arm-io/wdt, 24 MHz).
+ */
+#define T8142_WD2_BASE     0x3882b0000UL
+#define T8142_WD2_COUNT    0x20
+#define T8142_WD2_ALARM    0x28
+#define T8142_WD2_CTL      0x2c
+#define T8142_WD2_TICKS_S  24000000U
+
+void smp_s2r_wd2(u32 secs)
+{
+    if (chip_id != T8142)
+        return;
+    write32(T8142_WD2_BASE + T8142_WD2_CTL, 0);
+    write32(T8142_WD2_BASE + T8142_WD2_COUNT, 0);
+    write32(T8142_WD2_BASE + T8142_WD2_ALARM, secs * T8142_WD2_TICKS_S);
+    write32(T8142_WD2_BASE + T8142_WD2_CTL, 1);
+    sysop("dsb sy");
+}
+
 void smp_s2r_return_to_os(void)
 {
     u64 entry = s2r_mailbox->resume_pa;
@@ -475,8 +498,15 @@ void smp_s2r_return_to_os(void)
      */
     dockchannel_uart_try_puts(armed ? "aura: S2R wake, resuming the OS"
                                     : "aura: S2R reset not armed, rebooting");
-    if (!armed)
+    if (!armed) {
+        if (chip_id == T8142) {
+            /* Let WD2 say so: 30 s, not the 40 s of a wake taken. */
+            smp_s2r_wd2(30);
+            while (1)
+                sysop("wfe");
+        }
         reboot();
+    }
 
     s2r_mailbox->resume_pa = 0;
     s2r_mailbox->resumes++;
