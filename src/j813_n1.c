@@ -194,10 +194,74 @@ static int j813_n1_link(void)
     return (ident & 0xffff) == 0x106b ? 0 : -1;
 }
 
+/*
+ * The ADT's shared-block tables for Linux's sleep controller, which brings ANS's side of the
+ * block back after a real sleep in the order above: each 32-bit entry as an (offset, mask,
+ * value) triplet, under the Linux node with the matching reg-names. A table that doesn't
+ * fit is left out, and the sleep controller then refuses a real sleep with ANS stopped.
+ */
+struct j813_local_tunable {
+    u32 offset;
+    u32 size;
+    u64 mask;
+    u64 value;
+} PACKED;
+
+static int j813_publish_tunable(void *dt, int node, const char *adt_prop, const char *fdt_prop,
+                                u64 span)
+{
+    int adt_node = adt_path_offset(adt, APCIE);
+    u32 len;
+
+    if (adt_node < 0)
+        return -1;
+    const struct j813_local_tunable *t = adt_getprop(adt, adt_node, adt_prop, &len);
+    if (!t || !len || len % sizeof(*t))
+        return -1;
+    for (u32 i = 0; i < len / sizeof(*t); i++) {
+        if (t[i].size != 4 || t[i].offset % 4 || t[i].offset > span - 4 ||
+            t[i].mask > UINT32_MAX || t[i].value > UINT32_MAX)
+            return -1;
+    }
+    fdt_delprop(dt, node, fdt_prop);
+    for (u32 i = 0; i < len / sizeof(*t); i++) {
+        if (fdt_appendprop_u32(dt, node, fdt_prop, t[i].offset) ||
+            fdt_appendprop_u32(dt, node, fdt_prop, (u32)t[i].mask) ||
+            fdt_appendprop_u32(dt, node, fdt_prop, (u32)t[i].value))
+            return -1;
+    }
+    return 0;
+}
+
+static void j813_publish_apcie(void *dt)
+{
+    static const struct {
+        const char *adt, *fdt;
+        u64 span;
+    } tables[] = {
+        {"apcie-axi2af-tunables", "apple,tunable-axi2af", 0x24000},
+        {"apcie-phy-tunables", "apple,tunable-phy", 0x40000},
+        {"apcie-phy-ip-pll-tunables", "apple,tunable-phy-ip-pll", 0x20000},
+        {"apcie-phy-ip-auspma-tunables", "apple,tunable-phy-ip-auspma", 0x20000},
+    };
+    int node = fdt_path_offset(dt, "/soc/pcie-shared@48c000000");
+
+    if (node < 0)
+        return;
+    for (size_t i = 0; i < ARRAY_SIZE(tables); i++) {
+        if (j813_publish_tunable(dt, node, tables[i].adt, tables[i].fdt, tables[i].span)) {
+            printf("j813-n1: %s not published for the sleep controller\n", tables[i].adt);
+            fdt_delprop(dt, node, tables[i].fdt);
+        }
+    }
+}
+
 int j813_n1_prepare(void *dt)
 {
     if (chip_id != T8142)
         return 0;
+
+    j813_publish_apcie(dt);
 
     int node = fdt_node_offset_by_compatible(dt, -1, "pci-host-ecam-generic");
     if (node < 0)
