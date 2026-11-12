@@ -195,10 +195,11 @@ static int j813_n1_link(void)
 }
 
 /*
- * The ADT's shared-block tables for Linux's sleep controller, which brings ANS's side of the
- * block back after a real sleep in the order above: each 32-bit entry as an (offset, mask,
- * value) triplet, under the Linux node with the matching reg-names. A table that doesn't
- * fit is left out, and the sleep controller then refuses a real sleep with ANS stopped.
+ * The ADT's tables for Linux's sleep controller, which brings the shared block back after a
+ * real sleep and trains port 0 again, in the order above: each 32-bit entry as an (offset,
+ * mask, value) triplet, under the Linux node with the matching reg-names. A table that
+ * doesn't fit is left out, and the sleep controller then refuses a real sleep (ANS stopped,
+ * or the radio's host bound).
  */
 struct j813_local_tunable {
     u32 offset;
@@ -207,10 +208,10 @@ struct j813_local_tunable {
     u64 value;
 } PACKED;
 
-static int j813_publish_tunable(void *dt, int node, const char *adt_prop, const char *fdt_prop,
-                                u64 span)
+static int j813_publish_tunable(void *dt, int node, const char *adt_path, const char *adt_prop,
+                                const char *fdt_prop, u64 span)
 {
-    int adt_node = adt_path_offset(adt, APCIE);
+    int adt_node = adt_path_offset(adt, adt_path);
     u32 len;
 
     if (adt_node < 0)
@@ -235,21 +236,27 @@ static int j813_publish_tunable(void *dt, int node, const char *adt_prop, const 
 
 static void j813_publish_apcie(void *dt)
 {
+    /* The spans are the Linux node's windows: reg[5], [2], [4], then port 0's and its config. */
     static const struct {
-        const char *adt, *fdt;
+        const char *path, *adt, *fdt;
         u64 span;
     } tables[] = {
-        {"apcie-axi2af-tunables", "apple,tunable-axi2af", 0x24000},
-        {"apcie-phy-tunables", "apple,tunable-phy", 0x40000},
-        {"apcie-phy-ip-pll-tunables", "apple,tunable-phy-ip-pll", 0x20000},
-        {"apcie-phy-ip-auspma-tunables", "apple,tunable-phy-ip-auspma", 0x20000},
+        {APCIE, "apcie-axi2af-tunables", "apple,tunable-axi2af", 0x24000},
+        {APCIE, "apcie-phy-tunables", "apple,tunable-phy", 0x40000},
+        {APCIE, "apcie-phy-ip-pll-tunables", "apple,tunable-phy-ip-pll", 0x20000},
+        {APCIE, "apcie-phy-ip-auspma-tunables", "apple,tunable-phy-ip-auspma", 0x20000},
+        {APCIE_PORT, "apcie-config-tunables", "apple,tunable-radio-port", 0x8000},
+        {APCIE_PORT, "pcie-rc-tunables", "apple,tunable-radio-rc", 0x1000},
+        {APCIE_PORT, "pcie-rc-gen3-shadow-tunables", "apple,tunable-radio-rc-gen3", 0x1000},
+        {APCIE_PORT, "pcie-rc-gen4-shadow-tunables", "apple,tunable-radio-rc-gen4", 0x1000},
     };
     int node = fdt_path_offset(dt, "/soc/pcie-shared@48c000000");
 
     if (node < 0)
         return;
     for (size_t i = 0; i < ARRAY_SIZE(tables); i++) {
-        if (j813_publish_tunable(dt, node, tables[i].adt, tables[i].fdt, tables[i].span)) {
+        if (j813_publish_tunable(dt, node, tables[i].path, tables[i].adt, tables[i].fdt,
+                                 tables[i].span)) {
             printf("j813-n1: %s not published for the sleep controller\n", tables[i].adt);
             fdt_delprop(dt, node, tables[i].fdt);
         }
