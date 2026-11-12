@@ -482,6 +482,45 @@ void smp_s2r_wd2(u32 secs)
     sysop("dsb sy");
 }
 
+/*
+ * T8142 wake breadcrumbs: the PMU's boot stage (0xf801), which the PMU keeps as the "boot stage at
+ * the last reset" (0xf803) across a WD2 reset. Linux sets 0x50 at the sleep; aura sets 0x51 when it
+ * gets the wake, 0x52 right before entering the OS, 0x5f when it turns the wake away. The write is
+ * Linux's apple-sleep PMU write on nub-spmi0 (SPMI gen 4: queue at +0x200..+0x220, PMU at 0xe),
+ * raw and bounded, since nothing else here is set up yet.
+ */
+#define T8142_SPMI_BASE        0x388714000UL
+#define T8142_SPMI_STATUS      0x200
+#define T8142_SPMI_RX_EMPTY    BIT(30)
+#define T8142_SPMI_CMD         0x210
+#define T8142_SPMI_REPLY       0x220
+#define T8142_SPMI_NOTIFY_ACK  0x620
+#define T8142_PMU_BOOT_STAGE   0xf801
+#define T8142_SPMI_CMD_WRITE   (BIT(15) | (0xe << 8) | 0x30)
+
+static void smp_s2r_spmi_drain(void)
+{
+    for (int i = 0; i < 16 && !(read32(T8142_SPMI_BASE + T8142_SPMI_STATUS) & T8142_SPMI_RX_EMPTY);
+         i++)
+        read32(T8142_SPMI_BASE + T8142_SPMI_REPLY);
+}
+
+void smp_s2r_pmu_stage(u8 stage)
+{
+    if (chip_id != T8142)
+        return;
+    smp_s2r_spmi_drain();
+    write32(T8142_SPMI_BASE + T8142_SPMI_CMD,
+            ((u32)T8142_PMU_BOOT_STAGE << 16) | T8142_SPMI_CMD_WRITE);
+    write32(T8142_SPMI_BASE + T8142_SPMI_CMD, stage);
+    for (int i = 0; i < 2000000 && (read32(T8142_SPMI_BASE + T8142_SPMI_STATUS) & T8142_SPMI_RX_EMPTY);
+         i++)
+        ;
+    smp_s2r_spmi_drain();
+    write32(T8142_SPMI_BASE + T8142_SPMI_NOTIFY_ACK, 1);
+    sysop("dsb sy");
+}
+
 void smp_s2r_return_to_os(void)
 {
     u64 entry = s2r_mailbox->resume_pa;
@@ -500,6 +539,7 @@ void smp_s2r_return_to_os(void)
                                     : "aura: S2R reset not armed, rebooting");
     if (!armed) {
         if (chip_id == T8142) {
+            smp_s2r_pmu_stage(0x5f);
             /* Let WD2 say so: 30 s, not the 40 s of a wake taken. */
             smp_s2r_wd2(30);
             while (1)
@@ -512,6 +552,7 @@ void smp_s2r_return_to_os(void)
     s2r_mailbox->resumes++;
     sysop("dsb sy");
 
+    smp_s2r_pmu_stage(0x52);
     ((void (*)(void))entry)();
     reboot();
 }

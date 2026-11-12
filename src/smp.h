@@ -53,6 +53,7 @@ int smp_park_for_kernel(void);
 bool smp_resets_return_here(void);
 u64 smp_s2r_publish(void);
 bool smp_s2r_published(void);
+void smp_s2r_pmu_stage(u8 stage);
 void smp_s2r_return_to_os(void) __attribute__((noreturn));
 void smp_s2r_wd2(u32 secs);
 void smp_set_wfe_mode(bool new_mode);

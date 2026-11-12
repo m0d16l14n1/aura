@@ -259,8 +259,10 @@ void _cpu_reset_c(void *stack)
         return;
     }
     /* T8142's S2R wake: WD2 to 40 s before anything else here can hang (smp_s2r_wd2()). */
-    if (chip_id == T8142 && is_boot_cpu() && smp_s2r_published())
+    if (chip_id == T8142 && is_boot_cpu() && smp_s2r_published()) {
         smp_s2r_wd2(40);
+        smp_s2r_pmu_stage(0x51);
+    }
     bool quiet = (chip_id == T8142 && !is_boot_cpu()) || smp_s2r_published();
     if (!quiet) {
         if (!is_boot_cpu())
