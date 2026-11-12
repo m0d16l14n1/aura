@@ -145,6 +145,29 @@ struct smp_reset_stack smp_reset_stacks[MAX_CPUS] SMP_SHARED = {
 extern u8 _vectors_start[0];
 
 /*
+ * An OS at EL2 powers cores off and suspends itself, and the locked RVBAR brings every
+ * core back here. A secondary needs only its spin table entry, which still holds the
+ * OS's release target. The boot core takes resume_pa. Linux reads this layout in
+ * drivers/soc/apple/t8140-sleep.c.
+ */
+#define AURA_S2R_MAGIC 0x3152325341525541ULL /* "AURAS2R1" */
+
+struct aura_s2r_mailbox {
+    u64 magic;      /* aura, before the OS starts */
+    u64 boot_mpidr; /* aura: the only core that may take resume_pa */
+    u64 resume_pa;  /* OS, cleaned to PoC before it sleeps; aura clears it */
+    u64 resumes;    /* aura: resume_pa taken this many times */
+};
+
+static struct aura_s2r_mailbox s2r_mailbox_image SMP_SHARED ALIGNED(64);
+/*
+ * A T8142 core leaving reset can't store into the boot object (CTRR_D, below), and after an
+ * S2R wake that includes the boot core: smp_t8142_block_init() moves the mailbox into the
+ * block too. Only the pointer stays here, and the reset path only reads it.
+ */
+static struct aura_s2r_mailbox *s2r_mailbox SMP_SHARED = &s2r_mailbox_image;
+
+/*
  * macOS 27.0 iBoot locks CTRR_D over the whole boot object for the T8142 secondaries: they may
  * run aura's code there, but every store of theirs into it faults, with the MMU on or off. Their
  * stacks and the spin table live in one heap block above it instead, uncached like
@@ -177,7 +200,8 @@ bool smp_secondary_block(u64 *base, u64 *size)
 static int smp_t8142_block_init(int cpus)
 {
     size_t stacks = (size_t)cpus * SECONDARY_STACK_SIZE;
-    size_t size = ALIGN_UP(stacks + sizeof(spin_table_image), SZ_16K);
+    size_t mbox = ALIGN_UP(stacks + sizeof(spin_table_image), 64);
+    size_t size = ALIGN_UP(mbox + sizeof(*s2r_mailbox), SZ_16K);
     u8 *block = memalign(SZ_16K, size);
 
     if (!block)
@@ -189,8 +213,10 @@ static int smp_t8142_block_init(int cpus)
     t8142_block_size = size;
     t8142_block = block;
     spin_table = (struct spin_table *)(block + stacks);
+    s2r_mailbox = (struct aura_s2r_mailbox *)(block + mbox);
     sysop("dsb sy");
-    printf("SMP: T8142 secondary stacks and spin table at [%p, %p)\n", block, block + size);
+    printf("SMP: T8142 secondary stacks, spin table and S2R mailbox at [%p, %p)\n", block,
+           block + size);
     return 0;
 }
 
@@ -409,39 +435,22 @@ bool smp_resets_return_here(void)
     return (rvbar & RVBAR_LOCK) && smp_rvbar_reaches_here(rvbar & RVBAR_ADDR);
 }
 
-/*
- * An OS at EL2 powers cores off and suspends itself, and the locked RVBAR brings every
- * core back here. A secondary needs only its spin table entry, which still holds the
- * OS's release target. The boot core takes resume_pa. Linux reads this layout in
- * drivers/soc/apple/t8140-sleep.c.
- */
-#define AURA_S2R_MAGIC 0x3152325341525541ULL /* "AURAS2R1" */
-
-struct aura_s2r_mailbox {
-    u64 magic;      /* aura, before the OS starts */
-    u64 boot_mpidr; /* aura: the only core that may take resume_pa */
-    u64 resume_pa;  /* OS, cleaned to PoC before it sleeps; aura clears it */
-    u64 resumes;    /* aura: resume_pa taken this many times */
-};
-
-static struct aura_s2r_mailbox s2r_mailbox SMP_SHARED ALIGNED(64);
-
 /* Returns the mailbox's physical address: aura's mapping is the identity. */
 u64 smp_s2r_publish(void)
 {
-    s2r_mailbox.magic = AURA_S2R_MAGIC;
-    s2r_mailbox.boot_mpidr = mrs(MPIDR_EL1) & 0xFFFFFF;
-    s2r_mailbox.resume_pa = 0;
-    s2r_mailbox.resumes = 0;
-    dc_cvac_range(&s2r_mailbox, sizeof(s2r_mailbox));
+    s2r_mailbox->magic = AURA_S2R_MAGIC;
+    s2r_mailbox->boot_mpidr = mrs(MPIDR_EL1) & 0xFFFFFF;
+    s2r_mailbox->resume_pa = 0;
+    s2r_mailbox->resumes = 0;
+    dc_cvac_range(s2r_mailbox, sizeof(*s2r_mailbox));
     sysop("dsb sy");
-    return (u64)&s2r_mailbox;
+    return (u64)s2r_mailbox;
 }
 
 /* Once it is, the OS owns the UART and the display: reset paths must not print. */
 bool smp_s2r_published(void)
 {
-    return s2r_mailbox.magic == AURA_S2R_MAGIC;
+    return s2r_mailbox->magic == AURA_S2R_MAGIC;
 }
 
 /*
@@ -452,13 +461,13 @@ bool smp_s2r_published(void)
  */
 void smp_s2r_return_to_os(void)
 {
-    u64 entry = s2r_mailbox.resume_pa;
+    u64 entry = s2r_mailbox->resume_pa;
 
     /* exception_initialize() unmasked everything. */
     msr(DAIF, 0xf << 6);
 
     /* A reset the OS didn't arm: reboot rather than guess what state it's in. */
-    bool armed = entry && (mrs(MPIDR_EL1) & 0xFFFFFF) == s2r_mailbox.boot_mpidr;
+    bool armed = entry && (mrs(MPIDR_EL1) & 0xFFFFFF) == s2r_mailbox->boot_mpidr;
     /*
      * One line on the always-on DockChannel only: USB and the display are the OS's. Only
      * if it fits: with nobody draining the FIFO (a T6040, whose OS keeps the DockChannel
@@ -469,8 +478,8 @@ void smp_s2r_return_to_os(void)
     if (!armed)
         reboot();
 
-    s2r_mailbox.resume_pa = 0;
-    s2r_mailbox.resumes++;
+    s2r_mailbox->resume_pa = 0;
+    s2r_mailbox->resumes++;
     sysop("dsb sy");
 
     ((void (*)(void))entry)();
@@ -951,7 +960,13 @@ int smp_init(void)
     }
 
     spin_table[boot_cpu_idx].mpidr = mrs(MPIDR_EL1) & 0xFFFFFF;
-    smp_reset_stacks[boot_cpu_idx].stack = (u64)_stack_bot;
+    /*
+     * An S2R wake brings the boot core back through the reset vector confined like a
+     * secondary, so on T8142 its reset stack can't be aura's own: it takes its unused slot
+     * in the block. aura itself never resets the boot core.
+     */
+    smp_reset_stacks[boot_cpu_idx].stack =
+        chip_id == T8142 ? secondary_stack_top(boot_cpu_idx) : (u64)_stack_bot;
     smp_reset_stacks[boot_cpu_idx].mpidr = spin_table[boot_cpu_idx].mpidr;
     sysop("dsb sy");
 
