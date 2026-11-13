@@ -142,7 +142,12 @@ SECTIONS {
      * start.S has copied it, so everything before the pixel data must end below it. Past
      * _file_end the image is only zeros (.bss), as before.
      */
-    _file_limit = 0x120000;
+    /*
+     * J815 tree only (local, not for upstream): this build boots T8142 alone, where iBoot puts
+     * the panel DCP's firmware and log at the top of RAM (dcp-firmware@107e0300000 on a J815),
+     * not after stage 1, and the hibernation layout code takes the image ~16 KiB past 0x120000.
+     */
+    _file_limit = 0x130000;
     ASSERT(_file_vital_end - _base <= _file_limit,
            "Code and data reach the DCP log buffer after stage 1!")
 

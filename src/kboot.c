@@ -863,7 +863,14 @@ static int dt_check_trial_esp(void)
 }
 
 /*
- * Hibernation layout (T6040, config line hib=1).
+ * Hibernation layout (T6040 and T8142, config line hib=1).
+ *
+ * T8142 (J815 bring-up, unmeasured): the same boot chain (padded Stage 1, Stage 2 from the ESP,
+ * the OS in the CTXR exec window). A J815 boot had the window at RAM + 124 MiB and this stage's
+ * heap ending 300 MiB above the start of RAM, so the T6040 numbers are taken as they are; every
+ * check below still refuses a boot they don't fit. Its carveout map has one more region around
+ * the object (353). The reason for a refusal goes to /chosen/aura,hibernate-refused, since the
+ * J815 has no console to read it on.
  *
  * A hibernation image restores every page Linux saved to the frame it came from, so the boot that
  * resumes it must give Linux the same RAM and keep the same ranges from it. Without hib=1 they
@@ -908,6 +915,8 @@ static int dt_check_trial_esp(void)
 #define HIB_HEAP_MARGIN (8 * SZ_1M)
 
 static bool hib_requested, hib_decided;
+/* Why the layout was refused or withdrawn, for /chosen/aura,hibernate-refused */
+static const char *hib_refused_why;
 /* While the layout holds: the device tree slot, the heap above it, and the fixed end */
 static u64 hib_dt_base, hib_heap_base, hib_heap_end;
 /* The CTXR exec window inside the kept range, which the OS owns; empty without one */
@@ -916,8 +925,8 @@ static u64 hib_window_base, hib_window_end;
 void kboot_request_hibernate_layout(bool on)
 {
     hib_requested = on;
-    /* The layout is only known for T6040; another chip keeps the window it always had. */
-    ctxr_exec_request_fixed_window(on && chip_id == T6040);
+    /* The layout is only known for T6040 and T8142; another chip keeps the window it always had. */
+    ctxr_exec_request_fixed_window(on && (chip_id == T6040 || chip_id == T8142));
 }
 
 /* Whether [start, end) meets a range iBoot or the firmware owns, saying which. */
@@ -963,7 +972,8 @@ static bool hib_fixed_range_taken(u64 start, u64 end)
             memcpy(r, prop->value, sizeof(r));
             /* Region 24 is the usable RAM itself, region 45 the one iBoot loads the object in */
             if (!r[1] || r[0] > UINT64_MAX - r[1] ||
-                (m && (!strcmp(prop->name, "region-id-24") || !strcmp(prop->name, "region-id-45"))))
+                (m && (!strcmp(prop->name, "region-id-24") || !strcmp(prop->name, "region-id-45") ||
+                       (chip_id == T8142 && !strcmp(prop->name, "region-id-353")))))
                 continue;
             if (r[0] < end && r[0] + r[1] > start) {
                 printf("hib: the fixed range meets ADT %s/%s [0x%lx, 0x%lx)\n", maps[m], prop->name,
@@ -981,8 +991,8 @@ static const char *hib_layout_refused(u64 *slot, u64 *end, u64 *window, u64 *win
     u64 ram = cur_boot_args.phys_base, size = cur_boot_args.mem_size;
     u64 lo, base, top, win = 0, win_size = 0;
 
-    if (chip_id != T6040)
-        return "the fixed layout is only known for T6040";
+    if (chip_id != T6040 && chip_id != T8142)
+        return "the fixed layout is only known for T6040 and T8142";
     if (!size || ram > UINT64_MAX - size)
         return "invalid RAM extent";
     lo = ALIGN_UP(ram, HIB_RAM_ALIGN);
@@ -1028,6 +1038,7 @@ static void kboot_decide_hibernate_layout(void)
     if (!why && !heapblock_raise_base(slot + HIB_DT_SLOT))
         why = "the heap reaches the fixed slot";
     if (why) {
+        hib_refused_why = why;
         printf("hib: fixed layout refused: %s (RAM 0x%lx, aura 0x%lx..0x%lx, boot_args 0x%lx, "
                "top 0x%lx, heap 0x%lx); Linux will not hibernate this boot\n",
                why, cur_boot_args.phys_base, (u64)_base, (u64)_end, boot_args_addr,
@@ -1057,6 +1068,8 @@ static int kboot_withdraw_hibernate_layout(const char *why)
     hib_dt_base = hib_heap_base = hib_heap_end = 0;
     if (node < 0)
         bail("FDT: /chosen not found to withdraw the hibernation layout\n");
+    /* Best effort: the tree may have no room left for it. */
+    fdt_setprop_string(dt, node, "aura,hibernate-refused", why);
     for (size_t i = 0; i < ARRAY_SIZE(props); i++) {
         int ret = fdt_delprop(dt, node, props[i]);
         if (ret && ret != -FDT_ERR_NOTFOUND)
@@ -1085,6 +1098,9 @@ static int dt_reserve_hibernate_layout(void)
 
 static int dt_set_hibernate_layout(int node)
 {
+    if (hib_requested && !hib_heap_end && hib_refused_why &&
+        fdt_setprop_string(dt, node, "aura,hibernate-refused", hib_refused_why))
+        printf("FDT: couldn't set chosen.aura,hibernate-refused\n");
     if (!hib_heap_end)
         return 0;
 
