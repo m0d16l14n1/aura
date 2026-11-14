@@ -4531,12 +4531,13 @@ static int dt_set_ave_node(int node, const char *compat, u32 phandle)
 
     /*
      * The pre-M4 (6070) firmware runs from DART address zero (the ADT iova-offset); the
-     * M4-generation encoders keep running at their remap addresses.
+     * M4-generation encoders (M5 too) keep running at their remap addresses.
      */
     bool use_remap = !fdt_node_check_compatible(dt, node, "apple,t8140-ave") ||
                      !fdt_node_check_compatible(dt, node, "apple,t6041-ave") ||
                      !fdt_node_check_compatible(dt, node, "apple,t6050-ave") ||
-                     !fdt_node_check_compatible(dt, node, "apple,t8132-ave");
+                     !fdt_node_check_compatible(dt, node, "apple,t8132-ave") ||
+                     !fdt_node_check_compatible(dt, node, "apple,t8142-ave");
     /*
      * On T8112 the encoder's DART window starts at the DART's vm-base: iBoot points the
      * coprocessor code base there, and the firmware addresses DATA at vm-base plus its
