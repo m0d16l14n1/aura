@@ -4267,6 +4267,7 @@ static int dt_reserve_asc_firmware(const char *adt_path, const char *adt_path_al
 static const char *const ave_compatibles[] = {
     "apple,t6000-ave", "apple,t8112-ave", "apple,t8140-ave",
     "apple,t6041-ave", "apple,t6050-ave", "apple,t8132-ave",
+    "apple,t8142-ave",
 };
 
 /*
@@ -4674,6 +4675,7 @@ static const char *const ane_compatibles[] = {
     "apple,t6041-ane",
     "apple,t6050-ane",
     "apple,t8140-ane",
+    "apple,t8142-ane",
 };
 
 static int dt_ane_fill_region(int resv, uint32_t phandle, const char *kind, u64 phys, u64 size)
