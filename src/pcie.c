@@ -1153,6 +1153,14 @@ static int pcie_t6050_ps(const char *name, bool on)
     return -1;
 }
 
+bool pcie_ans_power_supported(void)
+{
+    if (chip_id == T6050)
+        return true;
+    int node = adt_path_offset(adt, pcie_ans_path());
+    return node >= 0 && !adt_is_compatible(adt, node, "apcie,t8142");
+}
+
 int pcie_ans_power_off(void)
 {
     if (chip_id == T6050) {

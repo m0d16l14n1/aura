@@ -648,7 +648,7 @@ bool nvme_init(void)
          * T6050: adopt a healthy session as it is. Left 16 s (an ESP Stage 2 behind its host
          * window), its firmware no longer acknowledged the idle, and ANS didn't start from off.
          */
-        adopted = earlier && chip_id == T6050 &&
+        adopted = earlier && (chip_id == T6050 || !pcie_ans_power_supported()) &&
                   read32(nvme_base + NVME_BOOT_STATUS) == NVME_BOOT_STATUS_OK &&
                   !(read32(nvme_base + NVME_CSTS) & NVME_CSTS_CFS);
         from_off = !running || (earlier && !adopted);
@@ -885,7 +885,12 @@ bool nvme_shutdown(void)
     if (nvme_type == NVME_T8132 && (adminq.failed || ioq.failed))
         goto out_preserve;
 
-    if (nvme_type == NVME_T8132 && nvme_keep_running_for_linux && !nvme_secure_regs) {
+    /*
+     * Linux adopts the running controller. So does the next aura stage where ANS can't be powered
+     * off and back (T8142): it takes the session over as an adopted one (nvme_init()).
+     */
+    bool hand_on = nvme_keep_running_for_linux || !pcie_ans_power_supported();
+    if (nvme_type == NVME_T8132 && hand_on && !nvme_secure_regs) {
         u32 cc = read32(nvme_base + NVME_CC);
         u32 csts = read32(nvme_base + NVME_CSTS);
         u32 boot_status = read32(nvme_base + NVME_BOOT_STATUS);
@@ -896,7 +901,8 @@ bool nvme_shutdown(void)
             return false;
         }
         nvme_initialized = false;
-        printf("nvme: leaving controller and RTKit running for Linux adoption\n");
+        printf("nvme: leaving controller and RTKit running for %s adoption\n",
+               nvme_keep_running_for_linux ? "Linux" : "the next stage's");
         return true;
     }
 
