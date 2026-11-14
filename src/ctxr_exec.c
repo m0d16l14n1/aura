@@ -237,6 +237,10 @@ static bool window_checked;
 static const char *window_problem;
 static u64 window_base, window_size;
 static bool fixed_requested, window_fixed;
+/* Why the fixed window was not taken, for kboot's refusal of the hibernation layout */
+static const char *fixed_why;
+/* What the fixed window was checked against, for the same report */
+static u64 fixed_armed_lower, fixed_armed_end;
 
 static bool ranges_overlap(u64 start_a, u64 end_a, u64 start_b, u64 end_b)
 {
@@ -288,9 +292,14 @@ static const char *ctxr_exec_fixed_window(u64 armed_end, u64 *start, u64 *end)
 {
     u64 ram = cur_boot_args.phys_base;
     u64 lo = ALIGN_UP(ram, CTXR_EXEC_SLIDE_ALIGN);
-    u64 lowest = lo + CTXR_EXEC_OBJECT_VA_OFF + CTXR_EXEC_OBJECT_IMAGE;
-    u64 highest = lowest + CTXR_EXEC_SLIDE_SPAN;
-    u64 base = (u64)_base;
+    u64 lowest, highest, base = (u64)_base;
+
+    /*
+     * T8142 (J815) follows this too: its RAM starts at 0x10003044000, not 32 MiB aligned, and
+     * the object sat at +0x2d88000 above the aligned start on a b46 boot (CTXR_D 146 MiB).
+     */
+    lowest = lo + CTXR_EXEC_OBJECT_VA_OFF + CTXR_EXEC_OBJECT_IMAGE;
+    highest = lowest + CTXR_EXEC_SLIDE_SPAN;
 
     if (!ram || lo < ram || highest < lo)
         return "the start of RAM is not known";
@@ -332,6 +341,9 @@ static const char *ctxr_exec_find_window(u64 *base, u64 *size)
         why = ctxr_exec_fixed_window(armed_end, &fixed_start, &fixed_end);
         if (!why)
             why = ctxr_exec_window_unusable(lower, armed_end, fixed_start, fixed_end);
+        fixed_armed_lower = lower;
+        fixed_armed_end = armed_end;
+        fixed_why = why;
         if (why) {
             printf("CTXR exec: no fixed window (%s): the OS gets the one above aura\n", why);
         } else {
@@ -378,6 +390,15 @@ bool ctxr_exec_request_fixed_window(bool on)
         return false;
     fixed_requested = on;
     return true;
+}
+
+const char *ctxr_exec_fixed_window_refused(u64 *armed_lower, u64 *armed_end)
+{
+    if (armed_lower)
+        *armed_lower = fixed_armed_lower;
+    if (armed_end)
+        *armed_end = fixed_armed_end;
+    return fixed_why;
 }
 
 bool ctxr_exec_window_is_fixed(void)

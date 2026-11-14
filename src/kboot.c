@@ -865,12 +865,13 @@ static int dt_check_trial_esp(void)
 /*
  * Hibernation layout (T6040 and T8142, config line hib=1).
  *
- * T8142 (J815 bring-up, unmeasured): the same boot chain (padded Stage 1, Stage 2 from the ESP,
- * the OS in the CTXR exec window). A J815 boot had the window at RAM + 124 MiB and this stage's
- * heap ending 300 MiB above the start of RAM, so the T6040 numbers are taken as they are; every
- * check below still refuses a boot they don't fit. Its carveout map has one more region around
- * the object (353). The reason for a refusal goes to /chosen/aura,hibernate-refused, since the
- * J815 has no console to read it on.
+ * T8142 (J815 bring-up): the same boot chain (padded Stage 1, Stage 2 from the ESP, the OS in the
+ * CTXR exec window) and the same object placement, but the ESP's kernel and initramfs fill this
+ * stage's heap past the T6040 slot: T8142 has its own slot and span (HIB_T8142_*), checked against
+ * its object region (ADT carveout 45). Its carveout map has one more region around the object
+ * (353). Every check below still refuses a boot they don't fit.
+ * The reason for a refusal goes to /chosen/aura,hibernate-refused and the numbers behind the
+ * decision to /chosen/aura,hibernate-info, since the J815 has no console to read them on.
  *
  * A hibernation image restores every page Linux saved to the frame it came from, so the boot that
  * resumes it must give Linux the same RAM and keep the same ranges from it. Without hib=1 they
@@ -910,6 +911,21 @@ static int dt_check_trial_esp(void)
 #define HIB_RAM_ALIGN     SZ_32M
 #define HIB_OBJECT_REGION (320 * SZ_1M)
 #define HIB_HEAP_SPAN     (128 * SZ_1M)
+/*
+ * T8142 (J815). Offsets from the 32 MiB aligned start of RAM (RAM itself starts at 0x10003044000,
+ * the aligned start is 0x10004000000), from its ADT and aura's own numbers on a b46 boot
+ * (/chosen/aura,hibernate-info): iBoot loads the object in carveout region 45, +0..+512 MiB, and
+ * region 46, which iBoot owns, follows it. The object sits where T6040's does (+45.5 MiB that
+ * boot, CTXR_D +44.5..+191.5), but before kboot_prepare_dt() the heap already holds the ESP's
+ * Image (37.7 MB), DTB, initramfs (43 MB) and the kernel's prepared copy (38.5 MiB): it reached
+ * +382.5 MiB, about +385 with the highest object. The T6040 slot (+320) is below that on every
+ * boot. T8142's slot is +432 MiB (47 MiB of room for the initramfs to grow) with an 80 MiB span,
+ * so that the kept range ends where region 45 does; a b45 boot's heap took 25.5 MiB after the
+ * decision.
+ */
+#define HIB_T8142_OBJECT_REGION (432 * SZ_1M)
+#define HIB_T8142_HEAP_SPAN     (80 * SZ_1M)
+#define HIB_T8142_REGION45_SIZE (512 * SZ_1M)
 #define HIB_DT_SLOT       (2 * SZ_1M)
 /* What aura may still allocate after the last check, as in the rover layout */
 #define HIB_HEAP_MARGIN (8 * SZ_1M)
@@ -917,6 +933,8 @@ static int dt_check_trial_esp(void)
 static bool hib_requested, hib_decided;
 /* Why the layout was refused or withdrawn, for /chosen/aura,hibernate-refused */
 static const char *hib_refused_why;
+/* The numbers behind the decision, for /chosen/aura,hibernate-info (J815 has no console) */
+static char hib_info[384];
 /* While the layout holds: the device tree slot, the heap above it, and the fixed end */
 static u64 hib_dt_base, hib_heap_base, hib_heap_end;
 /* The CTXR exec window inside the kept range, which the OS owns; empty without one */
@@ -926,7 +944,25 @@ void kboot_request_hibernate_layout(bool on)
 {
     hib_requested = on;
     /* The layout is only known for T6040 and T8142; another chip keeps the window it always had. */
-    ctxr_exec_request_fixed_window(on && (chip_id == T6040 || chip_id == T8142));
+    if (!ctxr_exec_request_fixed_window(on && (chip_id == T6040 || chip_id == T8142)) && on)
+        printf("hib: asked for after the CTXR exec window was looked up: no fixed window\n");
+}
+
+/*
+ * hib=esp (J815 batch 48): the layout only while the ESP holds aurora/j815/hib-on (aurora-hib-test arm/disarm), which
+ * boot_storage looks for once NVMe is up. A layout boot that hangs can then be undone from macOS
+ * by deleting that file, and every other boot is the plain one.
+ */
+static bool hib_from_esp;
+
+void kboot_hibernate_from_esp(void)
+{
+    hib_from_esp = true;
+}
+
+bool kboot_hibernate_wants_esp(void)
+{
+    return hib_from_esp && !hib_requested;
 }
 
 /* Whether [start, end) meets a range iBoot or the firmware owns, saying which. */
@@ -985,25 +1021,49 @@ static bool hib_fixed_range_taken(u64 start, u64 end)
     return false;
 }
 
+/* T8142: whether ADT carveout region 45 is where the layout assumes: at @lo, 512 MiB long. */
+static const char *hib_t8142_region45(u64 lo)
+{
+    int node = adt_path_offset(adt, "/chosen/carveout-memory-map");
+    const void *prop;
+    u64 r[2];
+    u32 len;
+
+    if (node < 0)
+        return "T8142: ADT /chosen/carveout-memory-map not found";
+    prop = adt_getprop(adt, node, "region-id-45", &len);
+    if (!prop || len != sizeof(r))
+        return "T8142: ADT carveout region 45 not found";
+    memcpy(r, prop, sizeof(r));
+    if (r[0] != lo || r[1] != HIB_T8142_REGION45_SIZE)
+        return "T8142: ADT carveout region 45 is not at the aligned start of RAM, 512 MiB long";
+    return NULL;
+}
+
 /* Why this boot can't have the fixed layout, or NULL with it computed. Changes nothing. */
 static const char *hib_layout_refused(u64 *slot, u64 *end, u64 *window, u64 *window_end)
 {
     u64 ram = cur_boot_args.phys_base, size = cur_boot_args.mem_size;
     u64 lo, base, top, win = 0, win_size = 0;
+    u64 region = chip_id == T8142 ? HIB_T8142_OBJECT_REGION : HIB_OBJECT_REGION;
+    u64 span = chip_id == T8142 ? HIB_T8142_HEAP_SPAN : HIB_HEAP_SPAN;
+    const char *why;
 
     if (chip_id != T6040 && chip_id != T8142)
         return "the fixed layout is only known for T6040 and T8142";
     if (!size || ram > UINT64_MAX - size)
         return "invalid RAM extent";
     lo = ALIGN_UP(ram, HIB_RAM_ALIGN);
-    if (lo < ram || lo - ram > size || size - (lo - ram) < HIB_OBJECT_REGION + HIB_HEAP_SPAN)
+    if (lo < ram || lo - ram > size || size - (lo - ram) < region + span)
         return "too little RAM";
-    base = lo + HIB_OBJECT_REGION;
-    top = base + HIB_HEAP_SPAN;
+    base = lo + region;
+    top = base + span;
+    if (chip_id == T8142 && (why = hib_t8142_region45(lo)))
+        return why;
     if (ctxr_exec_window(&win, &win_size) && (win <= ram || win > base || win_size > base - win))
         return "the CTXR exec window is not below the fixed slot";
     if (win_size && !ctxr_exec_window_is_fixed())
-        return "the CTXR exec window is not at a fixed address";
+        return ctxr_exec_fixed_window_refused(NULL, NULL) ?: "the CTXR exec window is not at a fixed address";
     if ((u64)_base < ram || (u64)_end > base)
         return "aura is not below the fixed slot";
     if (boot_args_addr < ram || boot_args_addr > base - SZ_16K)
@@ -1037,6 +1097,21 @@ static void kboot_decide_hibernate_layout(void)
     why = hib_layout_refused(&slot, &end, &win, &win_end);
     if (!why && !heapblock_raise_base(slot + HIB_DT_SLOT))
         why = "the heap reaches the fixed slot";
+    {
+        u64 wb = 0, ws = 0, al = 0, ae = 0;
+        u64 ram = cur_boot_args.phys_base;
+        const char *cw = ctxr_exec_fixed_window_refused(&al, &ae);
+
+        ctxr_exec_window(&wb, &ws);
+        snprintf(hib_info, sizeof(hib_info),
+                 "ram=0x%lx lo=+0x%lx aura=+0x%lx boot_args=+0x%lx top=+0x%lx heap=+0x%lx ctxr_d=+0x%lx..+0x%lx "
+                 "window=+0x%lx..+0x%lx fixed=%d%s%s slot=+0x%lx end=+0x%lx",
+                 ram, ALIGN_UP(ram, HIB_RAM_ALIGN) - ram, (u64)_base - ram, boot_args_addr - ram, cur_boot_args.top_of_kernel_data - ram,
+                 heap - ram, al ? al - ram : 0, ae ? ae - ram : 0, wb ? wb - ram : 0,
+                 wb ? wb + ws - ram : 0, ctxr_exec_window_is_fixed(), cw ? " fixed_why=" : "",
+                 cw ?: "", slot ? slot - ram : 0, end ? end - ram : 0);
+        printf("hib: %s\n", hib_info);
+    }
     if (why) {
         hib_refused_why = why;
         printf("hib: fixed layout refused: %s (RAM 0x%lx, aura 0x%lx..0x%lx, boot_args 0x%lx, "
@@ -1045,6 +1120,8 @@ static void kboot_decide_hibernate_layout(void)
                cur_boot_args.top_of_kernel_data, heap);
         return;
     }
+    /* T8142 breadcrumbs in the PMU boot stage (0x70 layout, 0x71 tree in its slot, 0x72 OS entry) */
+    smp_s2r_pmu_stage(0x70);
     hib_dt_base = slot;
     hib_heap_base = slot + HIB_DT_SLOT;
     hib_heap_end = end;
@@ -1098,6 +1175,8 @@ static int dt_reserve_hibernate_layout(void)
 
 static int dt_set_hibernate_layout(int node)
 {
+    if (hib_requested && hib_info[0] && fdt_setprop_string(dt, node, "aura,hibernate-info", hib_info))
+        printf("FDT: couldn't set chosen.aura,hibernate-info\n");
     if (hib_requested && !hib_heap_end && hib_refused_why &&
         fdt_setprop_string(dt, node, "aura,hibernate-refused", hib_refused_why))
         printf("FDT: couldn't set chosen.aura,hibernate-refused\n");
@@ -1135,6 +1214,7 @@ static void *kboot_hibernate_handoff_dt(void)
     memcpy((void *)hib_dt_base, dt, size);
     dc_cvac_range((void *)hib_dt_base, size);
     sysop("dsb sy");
+    smp_s2r_pmu_stage(0x71);
     printf("hib: device tree copied to its slot 0x%lx (%u bytes), heap high water 0x%lx of "
            "0x%lx..0x%lx\n",
            hib_dt_base, size, high_water, hib_heap_base, hib_heap_end);
@@ -12117,6 +12197,8 @@ int kboot_boot(void *kernel)
     }
     next_stage.entry = kernel;
     next_stage.args[0] = (u64)handoff_dt;
+    if (hib_dt_base)
+        smp_s2r_pmu_stage(0x72);
     next_stage.args[1] = 0;
     next_stage.args[2] = 0;
     next_stage.args[3] = 0;

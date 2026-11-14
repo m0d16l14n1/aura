@@ -249,6 +249,22 @@ int boot_storage_load(const char *spec, struct kernel_header **kernel, void **fd
     /* EFI payloads such as U-Boot let the selected OS supply its initramfs ("-"). */
     if (!nvme_init())
         goto fail_specs;
+    /* hib=esp: the hibernation layout for this boot only if the ESP holds the marker. */
+    if (kboot_hibernate_wants_esp()) {
+        char marker[160];
+        void *m = NULL;
+        size_t msize = 0;
+        int mlen = snprintf(marker, sizeof(marker), "%s;aurora/j815/hib-on", part[0]);
+
+        if (mlen > 0 && (size_t)mlen < sizeof(marker) &&
+            !rust_load_image(marker, &m, &msize, NULL, NULL, 0) && m) {
+            printf("boot: ESP aurora/j815/hib-on present: hibernation layout this boot\n");
+            rust_free_image(m, msize);
+            kboot_request_hibernate_layout(true);
+        } else {
+            printf("boot: no ESP aurora/j815/hib-on: plain layout\n");
+        }
+    }
     if (!boot_storage_trial(part[0], kernel, fdt) &&
         boot_storage_files(part[0], &part[1], kernel, fdt))
         goto fail;

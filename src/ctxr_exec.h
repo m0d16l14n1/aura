@@ -31,6 +31,8 @@ bool ctxr_exec_window(u64 *base, u64 *size);
 bool ctxr_exec_request_fixed_window(bool on);
 /* Whether the window the OS gets is that fixed one. */
 bool ctxr_exec_window_is_fixed(void);
+/* Why a requested fixed window was not taken (NULL if it was), and CTXR_D as it was checked */
+const char *ctxr_exec_fixed_window_refused(u64 *armed_lower, u64 *armed_end);
 /* False on a confined machine with no window, or with a probe still pending, having said why. */
 bool ctxr_exec_os_may_start(void);
 

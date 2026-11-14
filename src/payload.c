@@ -315,7 +315,10 @@ static bool check_var(u8 **p)
     } else if (IS_VAR("tso=")) {
         enable_tso = val[0] == '1';
     } else if (IS_VAR("hib=")) {
-        kboot_request_hibernate_layout(val[0] == '1');
+        if (!strncmp(val, "esp", 3))
+            kboot_hibernate_from_esp();
+        else
+            kboot_request_hibernate_layout(val[0] == '1');
     } else {
         printf("Unknown variable %.*s\n", (int)(val - (char *)*p - 1), (char *)*p);
     }
