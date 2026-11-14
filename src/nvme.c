@@ -1010,7 +1010,8 @@ int nvme_sart_entries(struct sart_entry *entries, int max, bool *off)
     if (nvme_initialized) {
         if (nvme_type != NVME_T8132)
             return 0;
-        *off = !nvme_secure_regs && !nvme_keep_running_for_linux;
+        /* Where PCIe can't power ANS (T8142), nvme_shutdown() hands the session on running. */
+        *off = !nvme_secure_regs && !nvme_keep_running_for_linux && pcie_ans_power_supported();
         return sart_get_entries(nvme_sart, entries, max);
     }
     if (nvme_sart_saved_cnt) {
@@ -1050,6 +1051,14 @@ bool nvme_set_sart_var(const char *val)
     u64 word[3];
 
     nvme_sart_saved_cnt = 0;
+    /*
+     * Where PCIe can't power ANS (T8142) no earlier stage powered it off: a b13.1-era stage
+     * passed the entries of a session it left running. Adopt that session instead.
+     */
+    if (nvme_post_m4() && !pcie_ans_power_supported()) {
+        printf("nvme: ignoring nvme.sart, ANS power isn't PCIe-controlled here\n");
+        return true;
+    }
     if (len % 48 || len / 48 > ARRAY_SIZE(nvme_sart_saved)) {
         printf("nvme: malformed nvme.sart\n");
         return false;
