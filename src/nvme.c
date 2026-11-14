@@ -436,6 +436,12 @@ bool nvme_post_m4(void)
                          adt_get_property(adt, node, "nvme-secure-reg-layout"));
 }
 
+/* ANS is powered through its own storage gates (pcie_ans_power_off()), not the APCIe block. */
+static bool nvme_ans_storage_gated(void)
+{
+    return chip_id == T6050 || chip_id == T8142;
+}
+
 /*
  * Post-M4, done with ANS: stop the controller, idle the firmware as macOS does before a sleep,
  * keep the SART entries, then power ANS and the PCIe block it runs on off. Every later stage that
@@ -452,7 +458,11 @@ static bool nvme_ans_power_off(void)
         if ((read32(nvme_base + NVME_CC) & NVME_CC_EN) && !nvme_ctrl_suspend())
             printf("nvme: controller suspend timed out\n");
     } else if (read32(nvme_base + NVME_CC) & NVME_CC_EN) {
-        if (nvme_wrote && !nvme_ctrl_shutdown())
+        /*
+         * T8142: the firmware's context is saved by the normal shutdown, which an adopted
+         * session's idle (its RTKit started elsewhere) may not acknowledge before the stop.
+         */
+        if ((nvme_wrote || chip_id == T8142) && !nvme_ctrl_shutdown())
             printf("nvme: controller shutdown timed out\n");
         if (!nvme_ctrl_disable())
             printf("nvme: controller disable timed out\n");
@@ -647,8 +657,9 @@ bool nvme_init(void)
         /*
          * T6050: adopt a healthy session as it is. Left 16 s (an ESP Stage 2 behind its host
          * window), its firmware no longer acknowledged the idle, and ANS didn't start from off.
+         * T8142 does the same with a session a stage of the b13.1 era handed on running.
          */
-        adopted = earlier && (chip_id == T6050 || !pcie_ans_power_supported()) &&
+        adopted = earlier && (nvme_ans_storage_gated() || !pcie_ans_power_supported()) &&
                   read32(nvme_base + NVME_BOOT_STATUS) == NVME_BOOT_STATUS_OK &&
                   !(read32(nvme_base + NVME_CSTS) & NVME_CSTS_CFS);
         from_off = !running || (earlier && !adopted);
@@ -714,7 +725,7 @@ setup_controller:
                "BOOT_STATUS=0x%x\n",
                read32(nvme_base + NVME_CC), read32(nvme_base + NVME_CSTS),
                read32(nvme_base + NVME_BOOT_STATUS));
-        if (earlier && !restarted && chip_id == T6050) {
+        if (earlier && !restarted && nvme_ans_storage_gated()) {
             restarted = true;
             if (!nvme_ans_power_off() || !nvme_ans_power_on())
                 goto out_preserve;
@@ -887,7 +898,7 @@ bool nvme_shutdown(void)
 
     /*
      * Linux adopts the running controller. So does the next aura stage where ANS can't be powered
-     * off and back (T8142): it takes the session over as an adopted one (nvme_init()).
+     * off and back: it takes the session over as an adopted one (nvme_init()).
      */
     bool hand_on = nvme_keep_running_for_linux || !pcie_ans_power_supported();
     if (nvme_type == NVME_T8132 && hand_on && !nvme_secure_regs) {
@@ -1010,7 +1021,7 @@ int nvme_sart_entries(struct sart_entry *entries, int max, bool *off)
     if (nvme_initialized) {
         if (nvme_type != NVME_T8132)
             return 0;
-        /* Where PCIe can't power ANS (T8142), nvme_shutdown() hands the session on running. */
+        /* Where PCIe can't power ANS, nvme_shutdown() hands the session on running. */
         *off = !nvme_secure_regs && !nvme_keep_running_for_linux && pcie_ans_power_supported();
         return sart_get_entries(nvme_sart, entries, max);
     }
@@ -1052,8 +1063,9 @@ bool nvme_set_sart_var(const char *val)
 
     nvme_sart_saved_cnt = 0;
     /*
-     * Where PCIe can't power ANS (T8142) no earlier stage powered it off: a b13.1-era stage
-     * passed the entries of a session it left running. Adopt that session instead.
+     * Where PCIe can't power ANS no earlier stage powered it off: the entries are those of a
+     * session it left running. Adopt that session instead. (A T8142 Stage 1 of the b13.1 era
+     * passes them for a running session too; nvme_init() finds ANS running and adopts it.)
      */
     if (nvme_post_m4() && !pcie_ans_power_supported()) {
         printf("nvme: ignoring nvme.sart, ANS power isn't PCIe-controlled here\n");

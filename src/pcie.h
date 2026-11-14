@@ -16,8 +16,9 @@ int pcie_t6050_init(void);
 /* Disable an untrained optional port's root port and DART in the handed-over tree */
 int pcie_t6050_handoff_fdt(void *dt);
 /*
- * Whether pcie_ans_power_off() and pcie_ans_power_on() can cycle this SoC's ANS. Where they
- * cannot (T8142: no apcie,t8142 controller support), each stage hands its live session on.
+ * Whether pcie_ans_power_off() and pcie_ans_power_on() can cycle this SoC's ANS: through its
+ * storage gates (T6050, T8142) or the whole APCIe block. Where they cannot, each stage hands its
+ * live session on.
  */
 bool pcie_ans_power_supported(void);
 int pcie_ans_power_off(void);
